@@ -16,7 +16,17 @@ namespace Zielarnia.Data
         {
             return new MySqlCommand(query, _connection);
         }
-        
+
+        public MySqlCommand CreateCommand()
+        {
+            return new MySqlCommand() { Connection = _connection };
+        }
+
+        public MySqlTransaction BeginTransaction()
+        {
+            return _connection.BeginTransaction();
+        }
+
         public void Dispose()
         {
             _connection?.Close();

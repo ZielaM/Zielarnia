@@ -8,10 +8,10 @@ namespace Zielarnia.Models.User
         public string Username { get; set; }
         public string FirstName { get; set; }
         public string LastName { get; set; }
-        public string Role { get; protected set; }
-        
+        public string Role { get; set; } 
+
         public abstract string GetRole();
-        
+
         public virtual void LogAction(string action)
         {
             Console.WriteLine($"[{DateTime.Now}] User {Username} ({Role}) performed: {action}");

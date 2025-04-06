@@ -4,7 +4,7 @@ namespace Zielarnia.Models.User
     {
         public Customer()
         {
-            Role = "customer";
+            Role = "customer";  // Teraz mo¿na ustawiæ Role, poniewa¿ setter jest publiczny
         }
 
         public override string GetRole() => Role;

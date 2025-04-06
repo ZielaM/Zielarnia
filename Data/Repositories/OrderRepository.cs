@@ -57,22 +57,18 @@ namespace Zielarnia.Data.Repositories
         {
             try
             {
-                // Rozpocznij transakcję
-                using var transaction = _dbContext.CreateCommand().Transaction;
-                
+                using var transaction = _dbContext.BeginTransaction();
+
                 try
                 {
-                    // Dodaj zamówienie
                     var cmdOrder = _dbContext.CreateCommand(
                         "INSERT INTO Zamowienia (klient_id, status) VALUES (@customerId, 'Nowe')");
                     cmdOrder.Parameters.AddWithValue("@customerId", customerId);
                     cmdOrder.ExecuteNonQuery();
-                    
-                    // Pobierz ID nowego zamówienia
+
                     var cmdLastId = _dbContext.CreateCommand("SELECT LAST_INSERT_ID()");
                     var orderId = Convert.ToInt32(cmdLastId.ExecuteScalar());
-                    
-                    // Dodaj szczegóły zamówienia
+
                     var cmdDetails = _dbContext.CreateCommand(
                         "INSERT INTO SzczegolyZamowienia (zamowienie_id, produkt_id, ilosc) " +
                         "VALUES (@orderId, @productId, @quantity)");
@@ -80,7 +76,7 @@ namespace Zielarnia.Data.Repositories
                     cmdDetails.Parameters.AddWithValue("@productId", productId);
                     cmdDetails.Parameters.AddWithValue("@quantity", quantity);
                     cmdDetails.ExecuteNonQuery();
-                    
+
                     transaction.Commit();
                 }
                 catch
