@@ -1,214 +1,188 @@
-﻿using System;
-using Zielarnia.Services;
-using Zielarnia.Data;
-using Zielarnia.Models.User;
-using MySqlConnector;
-using Zielarnia.Utils.Exceptions;
-using Zielarnia.Data.Repositories;
+﻿using Microsoft.Extensions.Configuration;
+using Zielarnia.Core.Models;
+using Zielarnia.Core.Services;
+using Zielarnia.Data.Services;
+using Zielarnia.UI;
+using Zielarnia.Core.Interfaces; // Logger interface
+using Zielarnia.Core.Events; // EventArgs
+using System; // For Exception, Directory, Path
+using System.IO; // For IOException etc.
+using System.Threading.Tasks; // For Task
 
-namespace Zielarnia
+namespace Zielarnia;
+
+internal class Program
 {
-    class Program
+    // Logger instance available to static event handlers
+    private static ILoggerService? _logger;
+
+    static async Task Main(string[] args)
     {
-        private static AuthService _authService;
-        private static ProductService _productService;
-        private static OrderService _orderService;
-        private static LoggingService _loggingService;
-        private static User _currentUser;
-
-        static void Main(string[] args)
+        // --- Konfiguracja ---
+        IConfiguration configuration;
+        try
         {
-            InitializeServices();
+             configuration = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                // Make appsettings optional initially to provide better error message if missing
+                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+                .Build();
 
-            Console.WriteLine("=== SYSTEM ZIELARNIA ===");
+             // Check if critical configuration exists
+             if (string.IsNullOrEmpty(configuration.GetConnectionString("DefaultConnection")))
+             {
+                 throw new InvalidOperationException("Connection string 'DefaultConnection' not found in appsettings.json.");
+             }
+              if (string.IsNullOrEmpty(configuration["UserSettings:UsersFilePath"]))
+             {
+                 throw new InvalidOperationException("User settings 'UsersFilePath' not found in appsettings.json.");
+             }
 
-            while (true)
+        }
+        catch (Exception ex) // Catches issues loading config file or missing critical keys
+        {
+             ConsoleHelper.WriteError($"Krytyczny błąd konfiguracji: {ex.Message}");
+             ConsoleHelper.WriteError("Sprawdź, czy plik 'appsettings.json' istnieje i zawiera wymagane klucze ('ConnectionStrings:DefaultConnection', 'UserSettings:UsersFilePath').");
+             Console.WriteLine("\nNaciśnij dowolny klawisz aby zakończyć...");
+             Console.ReadKey();
+             return; // Exit application if configuration is broken
+        }
+
+
+        // --- Tworzenie serwisów ---
+        try
+        {
+            // Logger first, as other services might need it
+            _logger = new FileLoggerService(configuration); // Create logger instance
+
+            // Subscribe logger to its own event (example)
+            _logger.LogSaved += Logger_LogSaved; // Use += to subscribe
+
+            // Other services
+            var dbService = new DatabaseService(configuration);
+            // Test DB connection early
+            await dbService.TestConnectionAsync();
+
+            var authService = new AuthenticationService(configuration, _logger); // Inject logger
+            var menuService = new MenuService(dbService, _logger); // Inject logger
+
+
+            // --- Subskrypcja zdarzeń logowania --- [source: 5]
+            authService.LoginAttempt += AuthService_LoginAttempt; // Use += to subscribe
+            authService.UserLoggedIn += AuthService_UserLoggedIn; // Use += to subscribe
+
+
+            // --- Główna logika aplikacji ---
+            await _logger.LogInfoAsync("Application started successfully.");
+            Console.WriteLine("Witaj w aplikacji Zielarnia!");
+
+            User? currentUser = null;
+            while (currentUser == null) // Login loop
             {
+                Console.WriteLine("\n--- Logowanie ---");
+                string login = ConsoleHelper.ReadString("Podaj login:");
+                // Basic check - allow trying empty login which should fail validation/lookup
+                // if (string.IsNullOrWhiteSpace(login)) continue;
+
+                string password = ConsoleHelper.ReadPassword("Podaj hasło:");
+
                 try
                 {
-                    if (_currentUser == null)
+                    currentUser = await authService.LoginAsync(login, password);
+
+                    if (currentUser == null)
                     {
-                        ShowLoginMenu();
+                        // Generic message shown to user. Specific reason logged by AuthService.
+                        ConsoleHelper.WriteError("Nieprawidłowy login lub hasło. Spróbuj ponownie.");
+                        await Task.Delay(1500); // Pause before clearing screen
+                        Console.Clear();
                     }
-                    else
-                    {
-                        ShowMainMenu();
-                    }
                 }
-                catch (DatabaseException ex)
+                catch (Exception ex) // Catch unexpected errors during login process itself
                 {
-                    Console.WriteLine($"Błąd bazy danych: {ex.Message}");
-                    _loggingService.LogError(ex);
+                    // Logged by lower layers if it's file read or verification error
+                    // This catches issues in the LoginAsync flow itself
+                    ConsoleHelper.WriteError($"Wystąpił nieoczekiwany błąd podczas próby logowania. Sprawdź logi.");
+                    // Log here with context if not already logged adequately
+                    await _logger.LogErrorAsync($"Unexpected error during LoginAsync call for user '{login}' in Program.cs", ex);
+                    await Task.Delay(2000);
+                    Console.Clear();
+                    // Decide if you want to exit or retry after unexpected error
                 }
-                catch (AuthException ex)
-                {
-                    Console.WriteLine($"Błąd autentykacji: {ex.Message}");
-                    _loggingService.LogError(ex);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Nieoczekiwany błąd: {ex.Message}");
-                    _loggingService.LogError(ex);
-                }
-            }
-        }
+            } // End login loop
 
-        private static void InitializeServices()
+            // Login successful
+            Console.Clear();
+            ConsoleHelper.WriteSuccess($"Zalogowano pomyślnie jako: {currentUser.Login} (Rola: {currentUser.Role})");
+            Console.WriteLine("\nWciśnij dowolny klawisz, aby przejść do menu głównego...");
+            Console.ReadKey();
+
+
+            // --- Główna pętla menu ---
+            await menuService.ShowMainMenu(currentUser);
+
+        }
+        catch (InvalidOperationException dbEx) when (dbEx.Message.Contains("Failed to connect"))
         {
-            var connectionString = "Server=localhost;Database=zielonazielarnia;User=root;Password=admin;";
-            var dbContext = new DatabaseContext(connectionString);
-
-            var userRepository = new UserRepository(dbContext);
-            var productRepository = new ProductRepository(dbContext);
-            var orderRepository = new OrderRepository(dbContext);
-
-            _authService = new AuthService(userRepository);
-            _productService = new ProductService(productRepository);
-            _orderService = new OrderService(orderRepository, productRepository);
-            _loggingService = new LoggingService(dbContext);
-
-            _authService.UserLoggedIn += (sender, e) =>
-            {
-                _currentUser = e.User;
-                _loggingService.LogAction(_currentUser, $"Zalogowano jako {_currentUser.Role}");
-                Console.WriteLine($"Witaj, {_currentUser.Username}!");
-            };
-
-            _authService.UserLoggedOut += (sender, e) =>
-            {
-                _loggingService.LogAction(_currentUser, "Wylogowano");
-                _currentUser = null;
-                Console.WriteLine("Wylogowano pomyślnie.");
-            };
+             // Specific handling for initial DB connection failure
+             ConsoleHelper.WriteError($"Nie można połączyć się z bazą danych. Sprawdź konfigurację i status serwera.");
+             await (_logger?.LogErrorAsync("Application startup failed due to database connection error.", dbEx) ?? Task.CompletedTask);
         }
-
-        private static void ShowLoginMenu()
+        catch (Exception ex) // Catch unexpected errors during service creation or main menu loop
         {
-            Console.WriteLine("\n=== MENU LOGOWANIA ===");
-            Console.WriteLine("1. Zaloguj się");
-            Console.WriteLine("2. Wyjdź");
-
-            var choice = Console.ReadLine();
-
-            switch (choice)
-            {
-                case "1":
-                    Console.Write("Login: ");
-                    var username = Console.ReadLine();
-                    Console.Write("Hasło: ");
-                    var password = Console.ReadLine();
-
-                    _currentUser = _authService.Login(username, password);
-                    break;
-                case "2":
-                    Environment.Exit(0);
-                    break;
-                default:
-                    Console.WriteLine("Nieprawidłowy wybór");
-                    break;
-            }
+             ConsoleHelper.WriteError($"Wystąpił krytyczny błąd aplikacji: {ex.Message}. Sprawdź logi.");
+             // Ensure logger exists before logging critical startup/runtime error
+             await (_logger?.LogErrorAsync("Critical application error occurred outside login/menu loop.", ex) ?? Task.CompletedTask);
         }
-
-        private static void ShowMainMenu()
+        finally
         {
-            Console.WriteLine($"\n=== MENU GŁÓWNE ({_currentUser.Role}) ===");
-            Console.WriteLine("1. Przeglądaj produkty");
-            Console.WriteLine("2. Złóż zamówienie");
-            Console.WriteLine("3. Zobacz swoje zamówienia");
-            Console.WriteLine("4. Wyloguj się");
-
-            if (_currentUser is Admin)
-            {
-                Console.WriteLine("5. Zarządzaj produktami");
-                Console.WriteLine("6. Zarządzaj zamówieniami");
-                Console.WriteLine("7. Zobacz logi systemowe");
-            }
-
-            var choice = Console.ReadLine();
-
-            switch (choice)
-            {
-                case "1":
-                    _productService.BrowseProducts();
-                    break;
-                case "2":
-                    CreateNewOrder();
-                    break;
-                case "3":
-                    _orderService.ViewCustomerOrders(_currentUser.Id);
-                    break;
-                case "4":
-                    _authService.Logout();
-                    break;
-                case "5" when _currentUser is Admin:
-                    ManageProducts();
-                    break;
-                case "6" when _currentUser is Admin:
-                    _orderService.ManageOrders();
-                    break;
-                case "7" when _currentUser is Admin:
-                    _loggingService.ShowSystemLogs();
-                    break;
-                default:
-                    Console.WriteLine("Nieprawidłowy wybór");
-                    break;
-            }
+             // Log application shutdown regardless of success/failure
+             await (_logger?.LogInfoAsync("Application shutting down.") ?? Task.CompletedTask);
+             Console.WriteLine("\nNaciśnij dowolny klawisz aby zamknąć okno...");
+             Console.ReadKey();
         }
+    } // End Main
 
-        private static void CreateNewOrder()
+    // --- Event Handlers ---
+
+    // These handlers MUST be static because Main is static, or the logger/authservice
+    // instances need to be accessible in a non-static context where handlers are defined.
+    // Using a static logger field makes static handlers feasible here.
+
+    /// <summary>
+    /// Handles the LoginAttempt event from AuthenticationService.
+    /// </summary>
+    private static Task AuthService_LoginAttempt(object sender, UserActionEventArgs e)
+    {
+        // Log every login attempt - Can be verbose, consider logging level or conditional logging
+        // Use Task.CompletedTask if no async work needed, but keep async signature for delegate compatibility
+        return _logger?.LogInfoAsync($"Login attempt recorded for user: '{e.Login}'. Timestamp: {e.Timestamp:O}") ?? Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Handles the UserLoggedIn event from AuthenticationService.
+    /// </summary>
+    private static Task AuthService_UserLoggedIn(object sender, UserActionEventArgs e)
+    {
+        // Log successful login details
+        if (e.Success && _logger != null)
         {
-            Console.WriteLine("\n=== TWORZENIE NOWEGO ZAMÓWIENIA ===");
-            _productService.BrowseProducts();
-
-            Console.Write("Podaj ID produktu: ");
-            var productId = int.Parse(Console.ReadLine());
-            Console.Write("Podaj ilość: ");
-            var quantity = int.Parse(Console.ReadLine());
-
-            _orderService.CreateOrder(_currentUser.Id, productId, quantity);
-            _loggingService.LogAction(_currentUser, $"Złożono nowe zamówienie produktu ID: {productId}");
+             // AuthenticationService already logs basic success, add more context here if needed
+             return _logger.LogInfoAsync($"Event Handler: User '{e.Login}' login confirmed. Role assigned. Details: {e.Message}");
         }
+        return Task.CompletedTask;
+    }
 
-        private static void ManageProducts()
-        {
-            Console.WriteLine("\n=== ZARZĄDZANIE PRODUKTAMI ===");
-            Console.WriteLine("1. Dodaj nowy produkt");
-            Console.WriteLine("2. Edytuj produkt");
-            Console.WriteLine("3. Usuń produkt");
-
-            var choice = Console.ReadLine();
-
-            switch (choice)
-            {
-                case "1":
-                    AddNewProduct();
-                    break;
-                case "2":
-                    // Implementacja edycji produktu
-                    break;
-                case "3":
-                    // Implementacja usuwania produktu
-                    break;
-                default:
-                    Console.WriteLine("Nieprawidłowy wybór");
-                    break;
-            }
-        }
-
-        private static void AddNewProduct()
-        {
-            Console.WriteLine("\n=== DODAWANIE NOWEGO PRODUKTU ===");
-            Console.Write("Nazwa: ");
-            var name = Console.ReadLine();
-            Console.Write("Opis: ");
-            var description = Console.ReadLine();
-            Console.Write("Cena: ");
-            var price = decimal.Parse(Console.ReadLine());
-            Console.Write("ID kategorii: ");
-            var categoryId = int.Parse(Console.ReadLine());
-
-            _productService.AddProduct(name, description, price, categoryId);
-            _loggingService.LogAction(_currentUser, $"Dodano nowy produkt: {name}");
-        }
+     /// <summary>
+    /// Handles the LogSaved event from the FileLoggerService (example).
+    /// </summary>
+    private static Task Logger_LogSaved(string logEntry)
+    {
+        // Optional: Perform action when a log is saved. Avoid complex/blocking operations here.
+        // Example: Write to console for real-time debug view (can be noisy)
+        // Console.ForegroundColor = ConsoleColor.DarkGray;
+        // Console.WriteLine($"[DEBUG LOG] {logEntry.Trim()}");
+        // Console.ResetColor();
+        return Task.CompletedTask; // Return completed task as required by Func<string, Task>
     }
 }
